@@ -34,6 +34,18 @@
 .receipt-item .icon-button{flex:none}
 .receipt-rename-form{display:flex;align-items:center;gap:4px;flex:1;min-width:0}
 .receipt-rename-form input{flex:1;min-width:0;height:32px;padding:5px 8px;border:1px solid var(--line);border-radius:4px;font:inherit;font-size:12px}
+.entry-receipt-label{margin-bottom:8px}
+.entry-receipt-label input{height:auto;padding:8px;background:#fafbf8}
+.entry-existing-receipts{display:grid;gap:6px;margin:0 0 14px;padding:10px;border:1px solid #eff0ea;border-radius:4px;background:#fafbf8}
+.entry-existing-receipts>strong{font-size:10px;color:#586054}
+.entry-existing-receipts>a{display:flex;align-items:center;gap:7px;min-width:0;padding:5px 3px;color:var(--green);text-decoration:none}
+.entry-existing-receipts>a:hover{text-decoration:underline}
+.entry-existing-receipts>a span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:11px}
+.entry-existing-receipts>a small,.entry-receipts-status,.entry-receipts-error{font-size:10px;color:#92978d}
+.entry-receipts-error{color:#a84e3a}
+.entry-receipt-files{display:grid;gap:4px;margin:-2px 0 14px}
+.entry-receipt-files>div{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;padding:4px 7px;border-radius:4px;background:#fafbf8}
+.entry-receipt-files span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:#777e73}
 .receipt-status{margin:0 0 12px}
 .receipt-empty{padding:18px 0;text-align:center}
 .receipt-modal .modal-footer{margin-top:16px}

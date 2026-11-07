@@ -17,9 +17,23 @@ async function request(url, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
-function EntryForm({ editing, busy, error, categories, onSave, onClose }) {
+async function uploadReceiptFile(transactionId, file) {
+  if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name} 超过 10MB 限制`);
+  return request(`/api/transactions/${transactionId}/receipts`, {
+    method: 'POST',
+    body: file,
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-Receipt-Name': encodeURIComponent(file.name),
+    },
+  });
+}
+
+function EntryForm({ editing, busy, error, categories, existingReceipts, receiptsLoading, receiptsError, onSave, onClose }) {
   const [type, setType] = useState(editing?.type || 'expense');
   const [category, setCategory] = useState(editing?.category || categories.expense[0]?.name || '');
+  const [receiptFiles, setReceiptFiles] = useState([]);
+  const [receiptError, setReceiptError] = useState('');
   useEffect(() => {
     if (!category && categories[type][0]) setCategory(categories[type][0].name);
   }, [categories, category, type]);
@@ -27,12 +41,40 @@ function EntryForm({ editing, busy, error, categories, onSave, onClose }) {
     setType(nextType);
     if (!categories[nextType].some((item) => item.name === category)) setCategory(categories[nextType][0]?.name || '');
   }
-  return <form onSubmit={onSave}>
+  async function submit(event) {
+    const result = await onSave(event, receiptFiles);
+    if (result?.failedFiles) setReceiptFiles(result.failedFiles);
+    if (result?.complete) setReceiptFiles([]);
+  }
+  function chooseReceipts(event) {
+    const files = [...event.target.files];
+    event.target.value = '';
+    const tooLarge = files.find((file) => file.size > 10 * 1024 * 1024);
+    if (tooLarge) {
+      setReceiptError(`${tooLarge.name} 超过 10MB 限制`);
+      return;
+    }
+    setReceiptError('');
+    setReceiptFiles((current) => [...current, ...files]);
+  }
+  return <form onSubmit={submit}>
     <fieldset className="type-switch"><legend>收支类型</legend>{['expense', 'income'].map((value) => <label key={value} className={`${type === value ? 'chosen' : ''} ${value}-choice`}><input type="radio" checked={type === value} onChange={() => changeType(value)} />{value === 'income' ? '收入' : '支出'}</label>)}</fieldset>
     <input type="hidden" name="type" value={type} />
     <label className="field-label">金额 <span>¥</span><input name="amount" type="number" min="0.01" max="999999999.99" step="0.01" defaultValue={editing?.amount ?? ''} placeholder="0.00" required /></label>
     <label className="field-label">分类<select name="category" value={category} onChange={(event) => setCategory(event.target.value)} required>{categories[type].map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></label>
     <div className="field-row"><label className="field-label">日期 <span>可补录历史日期</span><input name="date" type="date" defaultValue={editing?.date || today()} required /></label><label className="field-label">备注 <span>选填</span><input name="note" type="text" maxLength="200" defaultValue={editing?.note || ''} placeholder="例如：供应商名称" /></label></div>
+    <label className="field-label entry-receipt-label">添加凭证 <span>选填，任意格式，每张不超过 10MB</span><input type="file" multiple disabled={busy} onChange={chooseReceipts} /></label>
+    {editing && <section className="entry-existing-receipts" aria-label="已添加凭证">
+      <strong>已添加的凭证</strong>
+      {receiptsLoading && <span className="entry-receipts-status">正在加载凭证…</span>}
+      {receiptsError && <span className="entry-receipts-error">{receiptsError}</span>}
+      {!receiptsLoading && !receiptsError && existingReceipts.length === 0 && <span className="entry-receipts-status">暂无凭证</span>}
+      {!receiptsLoading && existingReceipts.map((receipt) => <a key={receipt.id} href={`/api/transactions/${editing.id}/receipts/${receipt.id}`} target="_blank" rel="noreferrer" title="点击预览或打开凭证">
+        <ReceiptText size={15} aria-hidden="true" /><span>{receipt.name || `凭证 ${receipt.id}`}</span><small>{(receipt.sizeBytes / 1024 / 1024).toFixed(2)} MB</small>
+      </a>)}
+    </section>}
+    {receiptFiles.length > 0 && <div className="entry-receipt-files">{receiptFiles.map((file, index) => <div key={`${file.name}-${file.size}-${file.lastModified}-${index}`}><span>{file.name} · {(file.size / 1024 / 1024).toFixed(2)} MB</span><button type="button" className="icon-button" aria-label={`移除 ${file.name}`} title="移除" disabled={busy} onClick={() => setReceiptFiles((current) => current.filter((_, fileIndex) => fileIndex !== index))}><X size={15} /></button></div>)}</div>}
+    {receiptError && <p className="form-error">{receiptError}</p>}
     {error && <p className="form-error">{error}</p>}<footer className="modal-footer"><button type="button" className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy}>{busy ? '保存中…' : '保存账目'}</button></footer>
   </form>;
 }
@@ -82,6 +124,9 @@ function App() {
   const [editing, setEditing] = useState(null);
   const [receiptTransaction, setReceiptTransaction] = useState(null);
   const [receipts, setReceipts] = useState([]);
+  const [editReceipts, setEditReceipts] = useState([]);
+  const [editReceiptsLoading, setEditReceiptsLoading] = useState(false);
+  const [editReceiptsError, setEditReceiptsError] = useState('');
   const [receiptBusy, setReceiptBusy] = useState(false);
   const [receiptError, setReceiptError] = useState('');
   const [draggingCategory, setDraggingCategory] = useState(null);
@@ -111,13 +156,35 @@ function App() {
     }
     catch (cause) { setError(cause.message); } finally { setBusy(false); }
   }
-  async function saveEntry(event) {
+  async function saveEntry(event, receiptFiles = []) {
     event.preventDefault(); setBusy(true); setError('');
     const payload = Object.fromEntries(new FormData(event.currentTarget).entries()); payload.amount = Number(payload.amount);
     try {
-      await request(editing ? `/api/transactions/${editing.id}` : '/api/transactions', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(payload) });
-      setMonth(payload.date.slice(0, 7)); setModal(false); setEditing(null); await loadData();
-    } catch (cause) { setError(cause.message); } finally { setBusy(false); }
+      const savedEntry = await request(editing ? `/api/transactions/${editing.id}` : '/api/transactions', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+      const failedFiles = [];
+      const uploadErrors = [];
+      for (const file of receiptFiles) {
+        try { await uploadReceiptFile(savedEntry.id, file); }
+        catch (cause) { failedFiles.push(file); uploadErrors.push(`${file.name}: ${cause.message}`); }
+      }
+      if (editing) {
+        try {
+          setEditReceipts(await request(`/api/transactions/${savedEntry.id}/receipts`));
+          setEditReceiptsError('');
+        } catch (cause) {
+          setEditReceiptsError(`凭证列表刷新失败：${cause.message}`);
+        }
+      }
+      setMonth(payload.date.slice(0, 7));
+      await loadData();
+      if (failedFiles.length > 0) {
+        setEditing(savedEntry);
+        setError(`账目已保存，但部分凭证未能上传：${uploadErrors.join('；')}。可移除失败文件后重试。`);
+        return { failedFiles };
+      }
+      setModal(false); setEditing(null);
+      return { complete: true };
+    } catch (cause) { setError(cause.message); return null; } finally { setBusy(false); }
   }
   async function removeEntry(entry) {
     if (!window.confirm(`确定删除「${entry.category}」这笔账目吗？`)) return;
@@ -135,6 +202,18 @@ function App() {
     }
     catch (cause) { setReceiptError(cause.message); }
   }
+  async function editEntry(entry) {
+    setEditing(entry);
+    setEditReceipts([]);
+    setEditReceiptsError('');
+    setEditReceiptsLoading(true);
+    setModal(true);
+    try {
+      setEditReceipts(await request(`/api/transactions/${entry.id}/receipts`));
+    } catch (cause) {
+      setEditReceiptsError(`凭证加载失败：${cause.message}`);
+    } finally { setEditReceiptsLoading(false); }
+  }
   async function uploadReceipts(event) {
     const files = [...event.target.files];
     event.target.value = '';
@@ -142,15 +221,7 @@ function App() {
     setReceiptBusy(true); setReceiptError('');
     try {
       for (const file of files) {
-        if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name} 超过 10MB 限制`);
-        await request(`/api/transactions/${receiptTransaction.id}/receipts`, {
-          method: 'POST',
-          body: file,
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'X-Receipt-Name': encodeURIComponent(file.name),
-          },
-        });
+        await uploadReceiptFile(receiptTransaction.id, file);
       }
       const saved = await request(`/api/transactions/${receiptTransaction.id}/receipts`);
       setReceipts(saved);
@@ -270,12 +341,12 @@ function App() {
       <section className="ledger-section"><div className="ledger-title"><div><p className="eyebrow">TRANSACTION HISTORY</p><h2>账目明细</h2></div><label className="month-picker"><span>月份</span><input type="month" value={month} onChange={(event) => setMonth(event.target.value)} /></label></div>
         <div className="toolbar"><div className="filter-tabs" role="group" aria-label="按收支筛选"><button className={filter === 'all' ? 'selected' : ''} onClick={() => setFilter('all')}>全部</button><button className={filter === 'income' ? 'selected' : ''} onClick={() => setFilter('income')}>收入</button><button className={filter === 'expense' ? 'selected' : ''} onClick={() => setFilter('expense')}>支出</button></div><label className="search-box"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索分类或备注" /></label></div>
         {error && <div className="notice-error">{error}<button onClick={() => setError('')} aria-label="关闭提示"><X size={15} /></button></div>}
-        <div className="table-wrap"><table><thead><tr><th>日期</th><th>分类 / 备注</th><th>类型</th><th className="amount-cell">金额</th><th className="actions-heading">操作</th></tr></thead><tbody>{filteredEntries.map((entry) => <tr key={entry.id}><td className="date-cell">{entry.date}</td><td><strong className="entry-category">{entry.category}</strong><span className="entry-note">{entry.note || '—'}</span></td><td><span className={`type-label ${entry.type}`}>{entry.type === 'income' ? '收入' : '支出'}</span></td><td className={`amount-cell amount ${entry.type}`}>{entry.type === 'income' ? '+' : '−'} ¥ {money(entry.amount)}</td><td className="row-actions"><button title="凭证" aria-label={`管理${entry.category}凭证`} onClick={() => openReceiptManager(entry)}><ImagePlus size={16} />{entry.receiptCount > 0 && <span className="receipt-count">{entry.receiptCount}</span>}</button><button title="编辑" aria-label="编辑账目" onClick={() => { setEditing(entry); setModal(true); }}><Pencil size={16} /></button><button title="删除" aria-label="删除账目" onClick={() => removeEntry(entry)}><Trash2 size={16} /></button></td></tr>)}</tbody></table>
+        <div className="table-wrap"><table><thead><tr><th>日期</th><th>分类 / 备注</th><th>类型</th><th className="amount-cell">金额</th><th className="actions-heading">操作</th></tr></thead><tbody>{filteredEntries.map((entry) => <tr key={entry.id}><td className="date-cell">{entry.date}</td><td><strong className="entry-category">{entry.category}</strong><span className="entry-note">{entry.note || '—'}</span></td><td><span className={`type-label ${entry.type}`}>{entry.type === 'income' ? '收入' : '支出'}</span></td><td className={`amount-cell amount ${entry.type}`}>{entry.type === 'income' ? '+' : '−'} ¥ {money(entry.amount)}</td><td className="row-actions"><button title="凭证" aria-label={`管理${entry.category}凭证`} onClick={() => openReceiptManager(entry)}><ImagePlus size={16} />{entry.receiptCount > 0 && <span className="receipt-count">{entry.receiptCount}</span>}</button><button title="编辑" aria-label="编辑账目" onClick={() => editEntry(entry)}><Pencil size={16} /></button><button title="删除" aria-label="删除账目" onClick={() => removeEntry(entry)}><Trash2 size={16} /></button></td></tr>)}</tbody></table>
           {filteredEntries.length === 0 && <div className="empty-state"><div className="empty-icon"><ReceiptText size={22} /></div><strong>这个月还没有账目</strong><span>记下第一笔收支，经营情况就一目了然。</span><button className="text-button" onClick={() => { setEditing(null); setModal(true); }}><Plus size={16} />记一笔</button></div>}</div><div className="table-footer">显示 {filteredEntries.length} 笔 · 当前筛选月份：{month}</div>
       </section>
       </>}
     </main>
-    {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setModal(false); setError(''); } }}><section className="entry-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header><div><p className="eyebrow">LEDGER ENTRY</p><h2 id="modal-title">{editing ? '编辑账目' : '记一笔'}</h2></div><button className="icon-button" onClick={() => { setModal(false); setError(''); }} aria-label="关闭"><X size={19} /></button></header><EntryForm key={editing?.id || 'new'} editing={editing} busy={busy} error={error} categories={categories} onSave={saveEntry} onClose={() => { setModal(false); setError(''); }} /></section></div>}
+    {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setModal(false); setError(''); } }}><section className="entry-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header><div><p className="eyebrow">LEDGER ENTRY</p><h2 id="modal-title">{editing ? '编辑账目' : '记一笔'}</h2></div><button className="icon-button" onClick={() => { setModal(false); setError(''); }} aria-label="关闭"><X size={19} /></button></header><EntryForm editing={editing} busy={busy} error={error} categories={categories} existingReceipts={editReceipts} receiptsLoading={editReceiptsLoading} receiptsError={editReceiptsError} onSave={saveEntry} onClose={() => { setModal(false); setError(''); }} /></section></div>}
     {receiptTransaction && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !receiptBusy) setReceiptTransaction(null); }}><section className="entry-modal receipt-modal" role="dialog" aria-modal="true" aria-labelledby="receipt-modal-title"><header><div><p className="eyebrow">TRANSACTION RECEIPTS</p><h2 id="receipt-modal-title">流水凭证</h2><p className="receipt-transaction-label">{receiptTransaction.date} · {receiptTransaction.category} · ¥ {money(receiptTransaction.amount)}</p></div><button className="icon-button" onClick={() => setReceiptTransaction(null)} aria-label="关闭" disabled={receiptBusy}><X size={19} /></button></header><label className="field-label receipt-file-label">添加凭证<span>任意文件格式，可多选；每张不超过 10MB</span><input type="file" multiple disabled={receiptBusy} onChange={uploadReceipts} /></label>{receiptError && <p className="form-error">{receiptError}</p>}{receiptBusy && <p className="receipt-status">正在处理凭证…</p>}<div className="receipt-list">{receipts.map((receipt) => <ReceiptRow key={receipt.id} receipt={receipt} busy={receiptBusy} onRename={renameReceipt} onRemove={removeReceipt} openUrl={`/api/transactions/${receiptTransaction.id}/receipts/${receipt.id}`} />)}{receipts.length === 0 && !receiptBusy && <p className="receipt-empty">还没有凭证，可以在上方选择任意格式文件上传。</p>}</div><footer className="modal-footer"><button type="button" className="quiet-button" onClick={() => setReceiptTransaction(null)} disabled={receiptBusy}>完成</button></footer></section></div>}
   </div>;
 }
