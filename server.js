@@ -18,7 +18,7 @@ const cookieName = 'ledger_session';
 const sessionDuration = 12 * 60 * 60 * 1000;
 const scrypt = promisify(crypto.scrypt);
 const defaultCategories = {
-  expense: ['日常开支', '交通', '人情支出', '进货', '房租水电', '工资支出', '其他支出'],
+  expense: ['日常开支', '交通出行', '人情支出', '进货支出', '房租水电', '工资支出', '其他支出'],
   income: ['日常收入', '人情收入', '销售收入', '其他收入'],
 };
 
