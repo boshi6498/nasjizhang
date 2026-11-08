@@ -19,7 +19,7 @@ const sessionDuration = 12 * 60 * 60 * 1000;
 const scrypt = promisify(crypto.scrypt);
 const defaultCategories = {
   expense: ['日常开支', '交通', '人情支出', '进货', '房租水电', '工资支出', '其他支出'],
-  income: ['日常收入', '人情收入', '出货', '其他收入'],
+  income: ['日常收入', '人情收入', '销售收入', '其他收入'],
 };
 
 if (!secret) throw new Error('APP_SECRET must be configured.');
